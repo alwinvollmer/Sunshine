@@ -107,6 +107,7 @@ namespace audio {
    * @param channel_data Platform-specific capture channel pointer.
    */
   void capture(safe::mail_t mail, config_t config, void *channel_data);
+  void mic_receive(safe::mail_t mail, config_t config, void *channel_data);
 
   /**
    * @brief Get the reference to the audio context.

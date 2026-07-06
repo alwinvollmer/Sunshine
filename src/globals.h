@@ -47,6 +47,7 @@ namespace mail {
   extern safe::mail_t man;
 
   // Global mail
+  MAIL(mic_packets);
   MAIL(shutdown);  ///< Shutdown.
   MAIL(broadcast_shutdown);  ///< Broadcast shutdown.
   MAIL(video_packets);  ///< Video packets.

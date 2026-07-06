@@ -24,6 +24,7 @@ namespace rtsp_stream {
     crypto::aes_t iv;  ///< Initial RTSP AES-GCM IV supplied by the client.
 
     std::string av_ping_payload;  ///< AV ping payload.
+    bool client_mic_enabled;
     uint32_t control_connect_data;  ///< Client-provided token used when connecting the control channel.
 
     bool host_audio;  ///< Whether host audio should be played locally.

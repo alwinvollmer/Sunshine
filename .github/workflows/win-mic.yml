@@ -1,0 +1,60 @@
+name: win-mic
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          update: true
+          install: wget
+      - name: deps
+        run: |
+          pacman -Syu --noconfirm \
+            git \
+            mingw-w64-ucrt-x86_64-cmake \
+            mingw-w64-ucrt-x86_64-cppwinrt \
+            mingw-w64-ucrt-x86_64-curl-winssl \
+            mingw-w64-ucrt-x86_64-gcc \
+            mingw-w64-ucrt-x86_64-MinHook \
+            mingw-w64-ucrt-x86_64-miniupnpc \
+            mingw-w64-ucrt-x86_64-nlohmann-json \
+            mingw-w64-ucrt-x86_64-nodejs \
+            mingw-w64-ucrt-x86_64-nsis \
+            mingw-w64-ucrt-x86_64-onevpl \
+            mingw-w64-ucrt-x86_64-openssl \
+            mingw-w64-ucrt-x86_64-opus \
+            mingw-w64-ucrt-x86_64-toolchain
+      - name: build
+        run: |
+          cmake -B build -G Ninja -S . \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DSUNSHINE_ASSETS_DIR=assets \
+            -DBUILD_DOCS=OFF \
+            -DBUILD_TESTS=OFF
+          ninja -C build
+      - name: package
+        run: |
+          cd build
+          cpack -G NSIS || true
+          cpack -G ZIP || true
+          mkdir -p ../artifacts
+          ls -la ./cpack_artifacts || true
+          cp ./cpack_artifacts/*.exe ../artifacts/ 2>/dev/null || true
+          cp ./cpack_artifacts/*.zip ../artifacts/ 2>/dev/null || true
+          ls -la ../artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sunshine-mic-windows
+          path: artifacts/
+          if-no-files-found: error

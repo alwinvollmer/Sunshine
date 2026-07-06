@@ -207,8 +207,10 @@ namespace config {
   struct audio_t {
     std::string sink;  ///< Audio output device/sink to use for audio capture
     std::string virtual_sink;  ///< Virtual audio sink for audio routing
+    std::string mic_sink;  ///< Output device the received client microphone is written to (mic passthrough)
     bool stream;  ///< Enable audio streaming to clients
     bool install_steam_drivers;  ///< Install Steam audio drivers for enhanced compatibility
+    bool enable_mic_passthrough;  ///< Receive the client microphone and inject it into mic_sink
   };
 
   /**

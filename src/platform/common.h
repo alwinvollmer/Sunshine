@@ -792,6 +792,18 @@ namespace platf {
   };
 
   /**
+   * @brief Sink that receives a decoded client microphone stream (mic passthrough).
+   */
+  class mic_output_t {
+  public:
+    virtual int output_samples(const std::vector<float> &frame_buffer) = 0;
+    virtual int start() = 0;
+    virtual int stop() = 0;
+
+    virtual ~mic_output_t() = default;
+  };
+
+  /**
    * @brief Platform audio controller that manages sinks and microphone capture.
    */
   class audio_control_t {
@@ -816,6 +828,11 @@ namespace platf {
      * @return Microphone capture object for the requested audio layout.
      */
     virtual std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, bool continuous, [[maybe_unused]] bool host_audio_enabled) = 0;
+
+    /**
+     * @brief Create an output that injects a received client microphone into a device (mic passthrough).
+     */
+    virtual std::unique_ptr<mic_output_t> mic_output(int channels, std::uint32_t sample_rate, const std::string &device_name) = 0;
 
     /**
      * @brief Check if the audio sink is available in the system.
