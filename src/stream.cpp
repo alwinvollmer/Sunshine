@@ -357,7 +357,6 @@ namespace stream {
   /**
    * @brief ENet control server that routes incoming control packets to stream sessions.
    */
-    std::thread micThread;
   class control_server_t {
   public:
     /**
@@ -487,6 +486,7 @@ namespace stream {
 
     std::thread audioThread;  ///< Audio thread.
     std::thread videoThread;  ///< Video thread.
+    std::thread micThread;  ///< Microphone decode thread (mic passthrough).
 
     std::chrono::steady_clock::time_point pingTimeout;  ///< Deadline for receiving the next client ping.
 
@@ -1595,45 +1595,6 @@ namespace stream {
       // the frame will be unrecoverable. Log an error for this case.
       if (aligned_size / blocksize >= 1024) {
         BOOST_LOG(error) << "Encoder produced a frame too large to send! Is the encoder broken? (needed "sv << (aligned_size / blocksize) << " packets)"sv;
-  void micReceiveThread(udp::socket &sock) {
-    auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
-    auto mic_packets = mail::man->queue<audio::packet_t>(mail::mic_packets);
-
-    BOOST_LOG(info) << "Starting microphone receive thread"sv;
-
-    while (!shutdown_event->peek()) {
-      std::array<char, 2048> buffer;
-      udp::endpoint sender_endpoint;
-      boost::system::error_code ec;
-
-      auto bytes_received = sock.receive_from(asio::buffer(buffer), sender_endpoint, 0, ec);
-      
-      if (ec) {
-        if (ec == boost::asio::error::operation_aborted) {
-          break;
-        }
-        BOOST_LOG(warning) << "Microphone receive error: " << ec.message();
-        continue;
-      }
-
-      if (bytes_received < 8) {
-        continue; // Too small to be a valid packet
-      }
-
-      // Extract microphone data and forward to processing.
-      // buffer_t has no iterator-pair ctor; allocate by size and copy the bytes in.
-      // The move ctor transfers the underlying unique_ptr, so a pointer captured
-      // before the move stays valid pointing into the packet's owned buffer.
-      audio::buffer_t mic_buf(bytes_received);
-      std::copy_n(reinterpret_cast<std::uint8_t *>(buffer.data()), bytes_received, mic_buf.begin());
-      void *mic_data_ptr = mic_buf.begin();
-      auto mic_packet = std::make_pair(mic_data_ptr, std::move(mic_buf));
-
-      mic_packets->raise(std::move(mic_packet));
-    }
-
-    BOOST_LOG(info) << "Microphone receive thread ended"sv;
-  }
 
       }
 
@@ -1842,6 +1803,46 @@ namespace stream {
    *
    * @param sock Socket used to read or write the protocol message.
    */
+  void micReceiveThread(udp::socket &sock) {
+    auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
+    auto mic_packets = mail::man->queue<audio::packet_t>(mail::mic_packets);
+
+    BOOST_LOG(info) << "Starting microphone receive thread"sv;
+
+    while (!shutdown_event->peek()) {
+      std::array<char, 2048> buffer;
+      udp::endpoint sender_endpoint;
+      boost::system::error_code ec;
+
+      auto bytes_received = sock.receive_from(asio::buffer(buffer), sender_endpoint, 0, ec);
+
+      if (ec) {
+        if (ec == boost::asio::error::operation_aborted) {
+          break;
+        }
+        BOOST_LOG(warning) << "Microphone receive error: " << ec.message();
+        continue;
+      }
+
+      if (bytes_received < 8) {
+        continue;  // Too small to be a valid packet
+      }
+
+      // Extract microphone data and forward to processing.
+      // buffer_t has no iterator-pair ctor; allocate by size and copy the bytes in.
+      // The move ctor transfers the underlying unique_ptr, so a pointer captured
+      // before the move stays valid pointing into the packet's owned buffer.
+      audio::buffer_t mic_buf(bytes_received);
+      std::copy_n(reinterpret_cast<std::uint8_t *>(buffer.data()), bytes_received, mic_buf.begin());
+      void *mic_data_ptr = mic_buf.begin();
+      auto mic_packet = std::make_pair(mic_data_ptr, std::move(mic_buf));
+
+      mic_packets->raise(std::move(mic_packet));
+    }
+
+    BOOST_LOG(info) << "Microphone receive thread ended"sv;
+  }
+
   void audioBroadcastThread(udp::socket &sock) {
     auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     auto packets = mail::man->queue<audio::packet_t>(mail::audio_packets);
