@@ -681,6 +681,170 @@ namespace platf::audio {
 
       status = audio_client->GetService(IID_IAudioCaptureClient, (void **) &audio_capture);
       if (FAILED(status)) {
+
+        BOOST_LOG(error) << "Couldn't initialize audio capture client [0x"sv << util::hex(status).to_string_view() << ']';
+
+        return -1;
+      }
+
+      status = audio_client->SetEventHandle(audio_event.get());
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Couldn't set event handle [0x"sv << util::hex(status).to_string_view() << ']';
+
+        return -1;
+      }
+
+      {
+        DWORD task_index = 0;
+        mmcss_task_handle = AvSetMmThreadCharacteristics("Pro Audio", &task_index);
+        if (!mmcss_task_handle) {
+          BOOST_LOG(error) << "Couldn't associate audio capture thread with Pro Audio MMCSS task [0x" << util::hex(GetLastError()).to_string_view() << ']';
+        }
+      }
+
+      status = audio_client->Start();
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Couldn't start recording [0x"sv << util::hex(status).to_string_view() << ']';
+
+        return -1;
+      }
+
+      return 0;
+    }
+
+    ~mic_wasapi_t() override {
+      if (device_enum) {
+        device_enum->UnregisterEndpointNotificationCallback(&endpt_notification);
+      }
+
+      if (audio_client) {
+        audio_client->Stop();
+      }
+
+      if (mmcss_task_handle) {
+        AvRevertMmThreadCharacteristics(mmcss_task_handle);
+      }
+    }
+
+  private:
+    capture_e _fill_buffer() {
+      HRESULT status;
+
+      // Total number of samples
+      struct sample_aligned_t {
+        std::uint32_t uninitialized;
+        float *samples;
+      } sample_aligned;
+
+      // number of samples / number of channels
+      struct block_aligned_t {
+        std::uint32_t audio_sample_size;
+      } block_aligned;
+
+      // Check if the default audio device has changed
+      if (endpt_notification.check_default_render_device_changed()) {
+        // Invoke the audio_control_t's callback if it wants one
+        if (default_endpt_changed_cb) {
+          (*default_endpt_changed_cb)();
+        }
+
+        // Reinitialize to pick up the new default device
+        return capture_e::reinit;
+      }
+
+      status = WaitForSingleObjectEx(audio_event.get(), default_latency_ms, FALSE);
+      switch (status) {
+        case WAIT_OBJECT_0:
+          break;
+        case WAIT_TIMEOUT:
+          return capture_e::timeout;
+        default:
+          BOOST_LOG(error) << "Couldn't wait for audio event: [0x"sv << util::hex(status).to_string_view() << ']';
+          return capture_e::error;
+      }
+
+      std::uint32_t packet_size {};
+      for (
+        status = audio_capture->GetNextPacketSize(&packet_size);
+        SUCCEEDED(status) && packet_size > 0;
+        status = audio_capture->GetNextPacketSize(&packet_size)
+      ) {
+        DWORD buffer_flags;
+        status = audio_capture->GetBuffer(
+          (BYTE **) &sample_aligned.samples,
+          &block_aligned.audio_sample_size,
+          &buffer_flags,
+          nullptr,
+          nullptr
+        );
+
+        switch (status) {
+          case S_OK:
+            break;
+          case AUDCLNT_E_DEVICE_INVALIDATED:
+            return capture_e::reinit;
+          default:
+            BOOST_LOG(error) << "Couldn't capture audio [0x"sv << util::hex(status).to_string_view() << ']';
+            return capture_e::error;
+        }
+
+        if (buffer_flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) {
+          BOOST_LOG(debug) << "Audio capture signaled buffer discontinuity";
+        }
+
+        sample_aligned.uninitialized = std::end(sample_buf) - sample_buf_pos;
+        auto n = std::min(sample_aligned.uninitialized, block_aligned.audio_sample_size * channels);
+
+        if (n < block_aligned.audio_sample_size * channels) {
+          BOOST_LOG(warning) << "Audio capture buffer overflow";
+        }
+
+        if (buffer_flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+          std::fill_n(sample_buf_pos, n, 0);
+        } else {
+          std::copy_n(sample_aligned.samples, n, sample_buf_pos);
+        }
+
+        sample_buf_pos += n;
+
+        audio_capture->ReleaseBuffer(block_aligned.audio_sample_size);
+      }
+
+      if (status == AUDCLNT_E_DEVICE_INVALIDATED) {
+        return capture_e::reinit;
+      }
+
+      if (FAILED(status)) {
+        return capture_e::error;
+      }
+
+      return capture_e::ok;
+    }
+
+  public:
+    handle_t audio_event;  ///< Event signaled by WASAPI when captured audio is available.
+
+    device_enum_t device_enum;  ///< Device enum.
+    device_t device;  ///< WASAPI endpoint device selected for capture.
+    audio_client_t audio_client;  ///< WASAPI audio client configured for shared-mode capture.
+    audio_capture_t audio_capture;  ///< WASAPI capture client used to read sample packets.
+
+    audio_notification_t endpt_notification;  ///< Endpoint notification callback registered with Windows.
+    std::optional<std::function<void()>> default_endpt_changed_cb;  ///< Callback invoked when the default endpoint changes.
+
+    REFERENCE_TIME default_latency_ms;  ///< WASAPI default device period used as capture latency.
+
+    util::buffer_t<float> sample_buf;  ///< Floating-point sample buffer filled from WASAPI packets.
+    float *sample_buf_pos;  ///< Current write position in `sample_buf`.
+    int channels;  ///< Number of channels in the capture format.
+    bool continuous_audio;  ///< Whether audio packets continue during silence.
+
+    HANDLE mmcss_task_handle = nullptr;  ///< MMCSS task handle for the audio capture thread.
+  };
+
+  /**
+   * @brief Platform audio controller that manages sinks and microphone capture.
+   */
   // cardoza's mic passthrough output was written against a generic ComPtr-style
   // handle it called com_ptr_t<T> (IID_PPV_ARGS(&x), &out-params, operator bool).
   // Sunshine has no such alias, so back it with WRL::ComPtr which supports those idioms.
@@ -874,169 +1038,6 @@ namespace platf::audio {
     }
   };
 
-        BOOST_LOG(error) << "Couldn't initialize audio capture client [0x"sv << util::hex(status).to_string_view() << ']';
-
-        return -1;
-      }
-
-      status = audio_client->SetEventHandle(audio_event.get());
-      if (FAILED(status)) {
-        BOOST_LOG(error) << "Couldn't set event handle [0x"sv << util::hex(status).to_string_view() << ']';
-
-        return -1;
-      }
-
-      {
-        DWORD task_index = 0;
-        mmcss_task_handle = AvSetMmThreadCharacteristics("Pro Audio", &task_index);
-        if (!mmcss_task_handle) {
-          BOOST_LOG(error) << "Couldn't associate audio capture thread with Pro Audio MMCSS task [0x" << util::hex(GetLastError()).to_string_view() << ']';
-        }
-      }
-
-      status = audio_client->Start();
-      if (FAILED(status)) {
-        BOOST_LOG(error) << "Couldn't start recording [0x"sv << util::hex(status).to_string_view() << ']';
-
-        return -1;
-      }
-
-      return 0;
-    }
-
-    ~mic_wasapi_t() override {
-      if (device_enum) {
-        device_enum->UnregisterEndpointNotificationCallback(&endpt_notification);
-      }
-
-      if (audio_client) {
-        audio_client->Stop();
-      }
-
-      if (mmcss_task_handle) {
-        AvRevertMmThreadCharacteristics(mmcss_task_handle);
-      }
-    }
-
-  private:
-    capture_e _fill_buffer() {
-      HRESULT status;
-
-      // Total number of samples
-      struct sample_aligned_t {
-        std::uint32_t uninitialized;
-        float *samples;
-      } sample_aligned;
-
-      // number of samples / number of channels
-      struct block_aligned_t {
-        std::uint32_t audio_sample_size;
-      } block_aligned;
-
-      // Check if the default audio device has changed
-      if (endpt_notification.check_default_render_device_changed()) {
-        // Invoke the audio_control_t's callback if it wants one
-        if (default_endpt_changed_cb) {
-          (*default_endpt_changed_cb)();
-        }
-
-        // Reinitialize to pick up the new default device
-        return capture_e::reinit;
-      }
-
-      status = WaitForSingleObjectEx(audio_event.get(), default_latency_ms, FALSE);
-      switch (status) {
-        case WAIT_OBJECT_0:
-          break;
-        case WAIT_TIMEOUT:
-          return capture_e::timeout;
-        default:
-          BOOST_LOG(error) << "Couldn't wait for audio event: [0x"sv << util::hex(status).to_string_view() << ']';
-          return capture_e::error;
-      }
-
-      std::uint32_t packet_size {};
-      for (
-        status = audio_capture->GetNextPacketSize(&packet_size);
-        SUCCEEDED(status) && packet_size > 0;
-        status = audio_capture->GetNextPacketSize(&packet_size)
-      ) {
-        DWORD buffer_flags;
-        status = audio_capture->GetBuffer(
-          (BYTE **) &sample_aligned.samples,
-          &block_aligned.audio_sample_size,
-          &buffer_flags,
-          nullptr,
-          nullptr
-        );
-
-        switch (status) {
-          case S_OK:
-            break;
-          case AUDCLNT_E_DEVICE_INVALIDATED:
-            return capture_e::reinit;
-          default:
-            BOOST_LOG(error) << "Couldn't capture audio [0x"sv << util::hex(status).to_string_view() << ']';
-            return capture_e::error;
-        }
-
-        if (buffer_flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) {
-          BOOST_LOG(debug) << "Audio capture signaled buffer discontinuity";
-        }
-
-        sample_aligned.uninitialized = std::end(sample_buf) - sample_buf_pos;
-        auto n = std::min(sample_aligned.uninitialized, block_aligned.audio_sample_size * channels);
-
-        if (n < block_aligned.audio_sample_size * channels) {
-          BOOST_LOG(warning) << "Audio capture buffer overflow";
-        }
-
-        if (buffer_flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-          std::fill_n(sample_buf_pos, n, 0);
-        } else {
-          std::copy_n(sample_aligned.samples, n, sample_buf_pos);
-        }
-
-        sample_buf_pos += n;
-
-        audio_capture->ReleaseBuffer(block_aligned.audio_sample_size);
-      }
-
-      if (status == AUDCLNT_E_DEVICE_INVALIDATED) {
-        return capture_e::reinit;
-      }
-
-      if (FAILED(status)) {
-        return capture_e::error;
-      }
-
-      return capture_e::ok;
-    }
-
-  public:
-    handle_t audio_event;  ///< Event signaled by WASAPI when captured audio is available.
-
-    device_enum_t device_enum;  ///< Device enum.
-    device_t device;  ///< WASAPI endpoint device selected for capture.
-    audio_client_t audio_client;  ///< WASAPI audio client configured for shared-mode capture.
-    audio_capture_t audio_capture;  ///< WASAPI capture client used to read sample packets.
-
-    audio_notification_t endpt_notification;  ///< Endpoint notification callback registered with Windows.
-    std::optional<std::function<void()>> default_endpt_changed_cb;  ///< Callback invoked when the default endpoint changes.
-
-    REFERENCE_TIME default_latency_ms;  ///< WASAPI default device period used as capture latency.
-
-    util::buffer_t<float> sample_buf;  ///< Floating-point sample buffer filled from WASAPI packets.
-    float *sample_buf_pos;  ///< Current write position in `sample_buf`.
-    int channels;  ///< Number of channels in the capture format.
-    bool continuous_audio;  ///< Whether audio packets continue during silence.
-
-    HANDLE mmcss_task_handle = nullptr;  ///< MMCSS task handle for the audio capture thread.
-  };
-
-  /**
-   * @brief Platform audio controller that manages sinks and microphone capture.
-   */
   class audio_control_t: public ::platf::audio_control_t {
   public:
     /**
