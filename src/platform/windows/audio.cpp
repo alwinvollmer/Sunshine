@@ -946,9 +946,12 @@ namespace platf::audio {
         return;
       }
 
+      // AUTOCONVERTPCM lets shared-mode accept our mono 48k float format and convert it
+      // to the device mix format (usually stereo); without it Initialize returns
+      // AUDCLNT_E_UNSUPPORTED_FORMAT (0x88890008). SRC_DEFAULT_QUALITY picks the resampler.
       hr = audio_client->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+        AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
         200000, // 20ms buffer
         0,
         wave_format,
