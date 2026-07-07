@@ -952,7 +952,7 @@ namespace platf::audio {
       hr = audio_client->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-        200000, // 20ms buffer
+        1000000, // 100ms buffer: headroom for network jitter (frames arrive ~20ms apart in bursts)
         0,
         wave_format,
         nullptr
@@ -984,27 +984,44 @@ namespace platf::audio {
       UINT32 buffer_frames;
       audio_client->GetBufferSize(&buffer_frames);
 
-      UINT32 padding;
-      audio_client->GetCurrentPadding(&padding);
+      // Write the ENTIRE frame. The previous code wrote only min(available, size)
+      // and discarded the remainder, so any time the device buffer wasn't fully
+      // drained (padding > 0, i.e. almost always) it truncated the 960-sample
+      // frame mid-stream -> continuous choppy distortion. Instead, write in
+      // chunks and wait for buffer space (render event) when the buffer is full.
+      const float *src = frame_buffer.data();
+      UINT32 remaining = (UINT32) frame_buffer.size();
 
-      UINT32 available_frames = buffer_frames - padding;
-      UINT32 frames_to_write = std::min(available_frames, (UINT32)frame_buffer.size());
+      while (remaining > 0) {
+        UINT32 padding = 0;
+        audio_client->GetCurrentPadding(&padding);
+        UINT32 available = buffer_frames - padding;
 
-      if (frames_to_write == 0) {
-        return 0;
-      }
+        if (available == 0) {
+          // Buffer full: wait for the device to consume a period, then retry.
+          // Bounded wait so a stalled device can't hang the decode thread.
+          if (WaitForSingleObjectEx(event_handle, 100, FALSE) == WAIT_TIMEOUT) {
+            return 0;
+          }
+          continue;
+        }
 
-      BYTE *buffer_ptr;
-      auto hr = render_client->GetBuffer(frames_to_write, &buffer_ptr);
-      if (FAILED(hr)) {
-        return -1;
-      }
+        UINT32 to_write = std::min(available, remaining);
+        BYTE *buffer_ptr;
+        auto hr = render_client->GetBuffer(to_write, &buffer_ptr);
+        if (FAILED(hr)) {
+          return -1;
+        }
 
-      memcpy(buffer_ptr, frame_buffer.data(), frames_to_write * sizeof(float));
+        memcpy(buffer_ptr, src, to_write * sizeof(float));
 
-      hr = render_client->ReleaseBuffer(frames_to_write, 0);
-      if (FAILED(hr)) {
-        return -1;
+        hr = render_client->ReleaseBuffer(to_write, 0);
+        if (FAILED(hr)) {
+          return -1;
+        }
+
+        src += to_write;
+        remaining -= to_write;
       }
 
       return 0;
