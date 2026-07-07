@@ -981,49 +981,51 @@ namespace platf::audio {
         return -1;
       }
 
-      UINT32 buffer_frames;
+      UINT32 buffer_frames = 0;
       audio_client->GetBufferSize(&buffer_frames);
+      const UINT32 needed = (UINT32) frame_buffer.size();
 
-      // Write the ENTIRE frame. The previous code wrote only min(available, size)
-      // and discarded the remainder, so any time the device buffer wasn't fully
-      // drained (padding > 0, i.e. almost always) it truncated the 960-sample
-      // frame mid-stream -> continuous choppy distortion. Instead, write in
-      // chunks and wait for buffer space (render event) when the buffer is full.
-      const float *src = frame_buffer.data();
-      UINT32 remaining = (UINT32) frame_buffer.size();
-
-      while (remaining > 0) {
+      // Write the ENTIRE frame or drop it -- never a partial frame. The old code
+      // wrote min(available, size) and discarded the remainder whenever padding>0
+      // (nearly always) -> choppy distortion. With the 100ms buffer there is
+      // almost always room for a whole 960-frame packet; if the buffer is briefly
+      // full we wait a bounded number of short intervals, then drop the frame
+      // (never truncate, never spin forever).
+      static int s_dbg = 0;
+      for (int tries = 0; tries < 8; tries++) {
         UINT32 padding = 0;
-        audio_client->GetCurrentPadding(&padding);
-        UINT32 available = buffer_frames - padding;
+        auto ph = audio_client->GetCurrentPadding(&padding);
+        if (FAILED(ph)) {
+          BOOST_LOG(warning) << "mic: GetCurrentPadding failed "sv << std::hex << ph;
+          return -1;
+        }
+        UINT32 available = (padding <= buffer_frames) ? (buffer_frames - padding) : 0;
 
-        if (available == 0) {
-          // Buffer full: wait for the device to consume a period, then retry.
-          // Bounded wait so a stalled device can't hang the decode thread.
-          if (WaitForSingleObjectEx(event_handle, 100, FALSE) == WAIT_TIMEOUT) {
-            return 0;
+        if (available >= needed) {
+          BYTE *buffer_ptr = nullptr;
+          auto hr = render_client->GetBuffer(needed, &buffer_ptr);
+          if (FAILED(hr)) {
+            BOOST_LOG(warning) << "mic: GetBuffer("sv << needed << ") failed "sv << std::hex << hr;
+            return -1;
           }
-          continue;
+          memcpy(buffer_ptr, frame_buffer.data(), needed * sizeof(float));
+          hr = render_client->ReleaseBuffer(needed, 0);
+          if (FAILED(hr)) {
+            BOOST_LOG(warning) << "mic: ReleaseBuffer failed "sv << std::hex << hr;
+            return -1;
+          }
+          if ((s_dbg++ % 100) == 0) {
+            BOOST_LOG(debug) << "mic: rendered frame #"sv << s_dbg << " ("sv << needed
+                             << " frames, buf="sv << buffer_frames << " pad="sv << padding << ")"sv;
+          }
+          return 0;
         }
-
-        UINT32 to_write = std::min(available, remaining);
-        BYTE *buffer_ptr;
-        auto hr = render_client->GetBuffer(to_write, &buffer_ptr);
-        if (FAILED(hr)) {
-          return -1;
-        }
-
-        memcpy(buffer_ptr, src, to_write * sizeof(float));
-
-        hr = render_client->ReleaseBuffer(to_write, 0);
-        if (FAILED(hr)) {
-          return -1;
-        }
-
-        src += to_write;
-        remaining -= to_write;
+        // Buffer full: give the device a moment to drain, then re-check.
+        WaitForSingleObjectEx(event_handle, 20, FALSE);
       }
-
+      if ((s_dbg++ % 100) == 0) {
+        BOOST_LOG(debug) << "mic: dropped frame, buffer stayed full (buf="sv << buffer_frames << ")"sv;
+      }
       return 0;
     }
 

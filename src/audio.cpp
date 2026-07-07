@@ -399,6 +399,7 @@ namespace audio {
     // Poll with a timeout so we re-check the shutdown event even when no mic
     // packets are arriving. A plain blocking pop() never returns on an idle
     // queue, which hung session teardown (Sunshine's 10s watchdog then aborted).
+    int rx = 0;
     while (!shutdown_event->peek()) {
       auto packet = packets->pop(std::chrono::milliseconds(100));
       if (!packet) {
@@ -409,10 +410,17 @@ namespace audio {
       auto opus_size = packet->second.size();
 
       int decoded_samples = opus_decode_float(opus_dec, opus_data, opus_size, decode_buffer.data(), decode_buffer.size(), 0);
+      if ((rx++ % 100) == 0) {
+        BOOST_LOG(debug) << "mic: rx packet #"sv << rx << " opus_size="sv << opus_size
+                         << " decoded="sv << decoded_samples << " samples"sv;
+      }
       if (decoded_samples > 0) {
         decode_buffer.resize(decoded_samples);
         mic_output->output_samples(decode_buffer);
         decode_buffer.resize(960);
+      } else {
+        BOOST_LOG(warning) << "mic: opus_decode_float returned "sv << decoded_samples
+                           << " for opus_size="sv << opus_size;
       }
     }
 
