@@ -362,7 +362,10 @@ namespace audio {
     }
 
     auto shutdown_event = mail->event<bool>(mail::shutdown);
-    auto packets = mail->queue<packet_t>(mail::mic_packets);
+    // Use the GLOBAL mail (mail::man) for mic_packets to match the producer
+    // (stream.cpp micReceiveThread raises to mail::man). The per-session `mail`
+    // is a different mailbox, so popping from it never received any packets.
+    auto packets = mail::man->queue<packet_t>(mail::mic_packets);
 
     // Create microphone output device
     auto audio_ctx = get_audio_ctx_ref();
@@ -393,9 +396,13 @@ namespace audio {
 
     std::vector<float> decode_buffer(960); // 20ms at 48kHz mono
 
-    while (auto packet = packets->pop()) {
-      if (shutdown_event->peek()) {
-        break;
+    // Poll with a timeout so we re-check the shutdown event even when no mic
+    // packets are arriving. A plain blocking pop() never returns on an idle
+    // queue, which hung session teardown (Sunshine's 10s watchdog then aborted).
+    while (!shutdown_event->peek()) {
+      auto packet = packets->pop(std::chrono::milliseconds(100));
+      if (!packet) {
+        continue;
       }
 
       auto opus_data = reinterpret_cast<const unsigned char*>(packet->first);
