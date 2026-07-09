@@ -10,6 +10,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <vector>
 
 // lib includes
 #include <boost/core/noncopyable.hpp>
@@ -1344,5 +1345,26 @@ namespace platf {
    * @return True on success.
    */
   bool set_clipboard(const std::string &content);
+
+  /**
+   * @brief A single clipboard file: its display name and raw bytes.
+   */
+  struct clipboard_file_t {
+    std::string name;  ///< File name (no path).
+    std::string data;  ///< Raw file contents.
+  };
+
+  /**
+   * @brief Get the files currently on the host clipboard (e.g. copied in Explorer).
+   * @return List of files with contents; empty if the clipboard holds no files.
+   */
+  std::vector<clipboard_file_t> get_clipboard_files();
+
+  /**
+   * @brief Place the given files on the host clipboard (staged to a temp dir).
+   * @param files Files (name + contents) to expose for pasting.
+   * @return True on success.
+   */
+  bool set_clipboard_files(const std::vector<clipboard_file_t> &files);
 
 }  // namespace platf

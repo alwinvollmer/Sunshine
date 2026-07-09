@@ -31,6 +31,7 @@
 #include "platform/common.h"
 #include "process.h"
 #include "rtsp.h"
+#include <cstdint>
 #include "system_tray.h"
 #include "utility.h"
 #include "uuid.h"
@@ -1247,19 +1248,80 @@ namespace nvhttp {
     response->close_connection_after_response = true;
   }
 
+  // Max total size for a clipboard file transfer (in-memory, no streaming).
+  static constexpr size_t MAX_CLIPBOARD_FILES_BYTES = 50 * 1024 * 1024;
+
+  // Wire format for type=files: [u32 count]{[u32 name_len][name][u32 data_len][data]}... (little-endian).
+  static void append_u32(std::string &buf, uint32_t v) {
+    buf.push_back(static_cast<char>(v & 0xFF));
+    buf.push_back(static_cast<char>((v >> 8) & 0xFF));
+    buf.push_back(static_cast<char>((v >> 16) & 0xFF));
+    buf.push_back(static_cast<char>((v >> 24) & 0xFF));
+  }
+
+  static bool read_u32(const std::string &buf, size_t &off, uint32_t &out) {
+    if (off + 4 > buf.size()) {
+      return false;
+    }
+    out = static_cast<uint8_t>(buf[off]) |
+          (static_cast<uint32_t>(static_cast<uint8_t>(buf[off + 1])) << 8) |
+          (static_cast<uint32_t>(static_cast<uint8_t>(buf[off + 2])) << 16) |
+          (static_cast<uint32_t>(static_cast<uint8_t>(buf[off + 3])) << 24);
+    off += 4;
+    return true;
+  }
+
+  static std::string serialize_clipboard_files(const std::vector<platf::clipboard_file_t> &files) {
+    std::string buf;
+    append_u32(buf, static_cast<uint32_t>(files.size()));
+    for (const auto &f : files) {
+      append_u32(buf, static_cast<uint32_t>(f.name.size()));
+      buf += f.name;
+      append_u32(buf, static_cast<uint32_t>(f.data.size()));
+      buf += f.data;
+    }
+    return buf;
+  }
+
+  static bool deserialize_clipboard_files(const std::string &buf, std::vector<platf::clipboard_file_t> &files) {
+    size_t off = 0;
+    uint32_t count = 0;
+    if (!read_u32(buf, off, count) || count > 100000) {
+      return false;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+      uint32_t nlen = 0;
+      if (!read_u32(buf, off, nlen) || off + nlen > buf.size()) {
+        return false;
+      }
+      platf::clipboard_file_t f;
+      f.name = buf.substr(off, nlen);
+      off += nlen;
+
+      uint32_t dlen = 0;
+      if (!read_u32(buf, off, dlen) || off + dlen > buf.size()) {
+        return false;
+      }
+      f.data = buf.substr(off, dlen);
+      off += dlen;
+      files.push_back(std::move(f));
+    }
+    return true;
+  }
+
   /**
-   * @brief Return the host clipboard text (client pulls host -> local).
+   * @brief Return the host clipboard (client pulls host -> local).
    *
-   * Ported from Apollo's /actions/clipboard. Text only. The endpoint is already
-   * behind mutual-TLS client-cert verification; we additionally require an active
-   * stream session so a paired-but-idle client cannot poll the host clipboard.
+   * type=text returns the clipboard text; type=files returns a serialized blob of
+   * the copied files (empty if none / over the size cap). Behind mutual-TLS +
+   * requires an active stream session.
    */
   void getClipboard(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
 
     auto args = request->parse_query_string();
     auto clipboard_type = get_arg(args, "type", "text");
-    if (clipboard_type != "text"sv) {
+    if (clipboard_type != "text"sv && clipboard_type != "files"sv) {
       BOOST_LOG(debug) << "Clipboard type ["sv << clipboard_type << "] is not supported"sv;
       response->write(SimpleWeb::StatusCode::client_error_bad_request);
       response->close_connection_after_response = true;
@@ -1269,6 +1331,25 @@ namespace nvhttp {
     if (rtsp_stream::session_count() == 0) {
       BOOST_LOG(debug) << "Clipboard get rejected: no active stream session"sv;
       response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    if (clipboard_type == "files"sv) {
+      auto files = platf::get_clipboard_files();
+      size_t total = 0;
+      for (const auto &f : files) {
+        total += f.data.size();
+      }
+      if (total > MAX_CLIPBOARD_FILES_BYTES) {
+        BOOST_LOG(info) << "Clipboard files ("sv << (total / (1024 * 1024))
+                        << " MB) exceed the "sv << (MAX_CLIPBOARD_FILES_BYTES / (1024 * 1024))
+                        << " MB cap; not sending"sv;
+        response->write(std::string());  // empty = nothing to sync
+        response->close_connection_after_response = true;
+        return;
+      }
+      response->write(serialize_clipboard_files(files));
       response->close_connection_after_response = true;
       return;
     }
@@ -1285,7 +1366,7 @@ namespace nvhttp {
 
     auto args = request->parse_query_string();
     auto clipboard_type = get_arg(args, "type", "text");
-    if (clipboard_type != "text"sv) {
+    if (clipboard_type != "text"sv && clipboard_type != "files"sv) {
       BOOST_LOG(debug) << "Clipboard type ["sv << clipboard_type << "] is not supported"sv;
       response->write(SimpleWeb::StatusCode::client_error_bad_request);
       response->close_connection_after_response = true;
@@ -1295,6 +1376,28 @@ namespace nvhttp {
     if (rtsp_stream::session_count() == 0) {
       BOOST_LOG(debug) << "Clipboard set rejected: no active stream session"sv;
       response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    if (clipboard_type == "files"sv) {
+      std::string body = request->content.string();
+      // Reject oversized payloads (allow a little framing overhead over the cap).
+      if (body.size() > MAX_CLIPBOARD_FILES_BYTES + (1u << 20)) {
+        BOOST_LOG(info) << "Clipboard files payload too large: "sv << (body.size() / (1024 * 1024)) << " MB"sv;
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        response->close_connection_after_response = true;
+        return;
+      }
+      std::vector<platf::clipboard_file_t> files;
+      if (!deserialize_clipboard_files(body, files)) {
+        BOOST_LOG(warning) << "Failed to parse clipboard files payload"sv;
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        response->close_connection_after_response = true;
+        return;
+      }
+      bool ok = platf::set_clipboard_files(files);
+      response->write(ok ? SimpleWeb::StatusCode::success_ok : SimpleWeb::StatusCode::server_error_internal_server_error);
       response->close_connection_after_response = true;
       return;
     }
