@@ -1247,6 +1247,63 @@ namespace nvhttp {
     response->close_connection_after_response = true;
   }
 
+  /**
+   * @brief Return the host clipboard text (client pulls host -> local).
+   *
+   * Ported from Apollo's /actions/clipboard. Text only. The endpoint is already
+   * behind mutual-TLS client-cert verification; we additionally require an active
+   * stream session so a paired-but-idle client cannot poll the host clipboard.
+   */
+  void getClipboard(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+
+    auto args = request->parse_query_string();
+    auto clipboard_type = get_arg(args, "type", "text");
+    if (clipboard_type != "text"sv) {
+      BOOST_LOG(debug) << "Clipboard type ["sv << clipboard_type << "] is not supported"sv;
+      response->write(SimpleWeb::StatusCode::client_error_bad_request);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    if (rtsp_stream::session_count() == 0) {
+      BOOST_LOG(debug) << "Clipboard get rejected: no active stream session"sv;
+      response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    response->write(platf::get_clipboard());
+    response->close_connection_after_response = true;
+  }
+
+  /**
+   * @brief Set the host clipboard from the request body (client pushes local -> host).
+   */
+  void setClipboard(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+
+    auto args = request->parse_query_string();
+    auto clipboard_type = get_arg(args, "type", "text");
+    if (clipboard_type != "text"sv) {
+      BOOST_LOG(debug) << "Clipboard type ["sv << clipboard_type << "] is not supported"sv;
+      response->write(SimpleWeb::StatusCode::client_error_bad_request);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    if (rtsp_stream::session_count() == 0) {
+      BOOST_LOG(debug) << "Clipboard set rejected: no active stream session"sv;
+      response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    bool success = platf::set_clipboard(request->content.string());
+    response->write(success ? SimpleWeb::StatusCode::success_ok : SimpleWeb::StatusCode::server_error_internal_server_error);
+    response->close_connection_after_response = true;
+  }
+
   void setup(const std::string &pkey, const std::string &cert) {
     conf_intern.pkey = pkey;
     conf_intern.servercert = cert;
@@ -1370,6 +1427,8 @@ namespace nvhttp {
       resume(host_audio, resp, req);
     };
     https_server.resource["^/cancel$"]["GET"] = cancel;
+    https_server.resource["^/actions/clipboard$"]["GET"] = getClipboard;
+    https_server.resource["^/actions/clipboard$"]["POST"] = setClipboard;
 
     https_server.config.reuse_address = true;
     https_server.config.address = net::get_bind_address(address_family);

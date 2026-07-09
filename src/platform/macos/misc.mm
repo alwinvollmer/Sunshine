@@ -580,6 +580,15 @@ namespace platf {
   std::string resolve_render_device() {
     return {};
   }
+
+  // Clipboard sync is implemented only for Windows hosts (matching Apollo).
+  std::string get_clipboard() {
+    return {};
+  }
+
+  bool set_clipboard(const std::string &) {
+    return false;
+  }
 }  // namespace platf
 
 namespace dyn {

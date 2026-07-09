@@ -1879,4 +1879,82 @@ namespace platf {
   std::string resolve_render_device() {
     return {};
   }
+
+  // --- Clipboard sync (text only) ---------------------------------------------
+  // Ported from ClassicOldSong/Apollo. Reads/writes CF_UNICODETEXT via the Win32
+  // clipboard, converting to/from UTF-8 with our utf_utils helpers.
+
+  // Windows expects CRLF line endings on the clipboard; insert \r before any \n
+  // that isn't already preceded by one.
+  static std::string ensure_crlf(const std::string &utf8) {
+    std::string result;
+    result.reserve(utf8.size() + utf8.size() / 2);
+    for (size_t i = 0; i < utf8.size(); ++i) {
+      if (utf8[i] == '\n' && (i == 0 || utf8[i - 1] != '\r')) {
+        result += '\r';
+      }
+      result += utf8[i];
+    }
+    return result;
+  }
+
+  static std::wstring read_clipboard_utf16() {
+    if (!OpenClipboard(nullptr)) {
+      BOOST_LOG(warning) << "Failed to open clipboard for reading"sv;
+      return L"";
+    }
+    HANDLE h_data = GetClipboardData(CF_UNICODETEXT);
+    if (h_data == nullptr) {
+      CloseClipboard();
+      return L"";
+    }
+    auto *psz = static_cast<wchar_t *>(GlobalLock(h_data));
+    if (psz == nullptr) {
+      CloseClipboard();
+      return L"";
+    }
+    std::wstring ret = psz;
+    GlobalUnlock(h_data);
+    CloseClipboard();
+    return ret;
+  }
+
+  static bool write_clipboard_utf16(const std::wstring &text) {
+    if (!OpenClipboard(nullptr)) {
+      BOOST_LOG(warning) << "Failed to open clipboard for writing"sv;
+      return false;
+    }
+    if (!EmptyClipboard()) {
+      CloseClipboard();
+      return false;
+    }
+    HGLOBAL h_global = GlobalAlloc(GMEM_MOVEABLE, text.size() * 2 + 2);
+    if (h_global == nullptr) {
+      CloseClipboard();
+      return false;
+    }
+    auto *p_global = static_cast<char *>(GlobalLock(h_global));
+    if (p_global == nullptr) {
+      GlobalFree(h_global);
+      CloseClipboard();
+      return false;
+    }
+    memcpy(p_global, text.c_str(), text.size() * 2 + 2);
+    GlobalUnlock(h_global);
+    if (SetClipboardData(CF_UNICODETEXT, h_global) == nullptr) {
+      GlobalFree(h_global);
+      CloseClipboard();
+      return false;
+    }
+    CloseClipboard();
+    return true;
+  }
+
+  std::string get_clipboard() {
+    return utf_utils::to_utf8(read_clipboard_utf16());
+  }
+
+  bool set_clipboard(const std::string &content) {
+    return write_clipboard_utf16(utf_utils::from_utf8(ensure_crlf(content)));
+  }
 }  // namespace platf

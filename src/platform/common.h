@@ -1332,4 +1332,17 @@ namespace platf {
    */
   void drop_elevated_privileges(bool all_caps);
 
+  /**
+   * @brief Get the host's current clipboard text (UTF-8). Empty if unavailable.
+   * @return Clipboard text.
+   */
+  std::string get_clipboard();
+
+  /**
+   * @brief Set the host's clipboard to the given UTF-8 text.
+   * @param content UTF-8 text to place on the clipboard.
+   * @return True on success.
+   */
+  bool set_clipboard(const std::string &content);
+
 }  // namespace platf

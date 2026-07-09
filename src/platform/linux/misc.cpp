@@ -1446,4 +1446,14 @@ namespace platf {
     }
 #endif
   }
+
+  // Clipboard sync is implemented only for Windows hosts (matching Apollo, whose
+  // Linux clipboard functions are also placeholders).
+  std::string get_clipboard() {
+    return {};
+  }
+
+  bool set_clipboard(const std::string &) {
+    return false;
+  }
 }  // namespace platf
