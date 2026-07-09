@@ -29,6 +29,7 @@
 #include <Windows.h>
 #include <WinUser.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <wlanapi.h>
 #include <WS2tcpip.h>
 #include <WtsApi32.h>
