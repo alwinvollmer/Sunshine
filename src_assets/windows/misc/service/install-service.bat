@@ -4,9 +4,9 @@ setlocal enabledelayedexpansion
 rem Get sunshine root directory
 for %%I in ("%~dp0\..") do set "ROOT_DIR=%%~fI"
 
-set SERVICE_NAME=SunshineService
+set SERVICE_NAME=SunshineExtendedService
 set "SERVICE_BIN=%ROOT_DIR%\tools\sunshinesvc.exe"
-set "SERVICE_CONFIG_DIR=%LOCALAPPDATA%\LizardByte\Sunshine"
+set "SERVICE_CONFIG_DIR=%LOCALAPPDATA%\LizardByte\SunshineExtended"
 set "SERVICE_CONFIG_FILE=%SERVICE_CONFIG_DIR%\service_start_type.txt"
 
 rem Set service to demand start. It will be changed to auto later if the user selected that option.
@@ -58,10 +58,10 @@ if exist "%SERVICE_CONFIG_FILE%" (
 echo Setting service start type set to: [!SERVICE_START_TYPE!]
 
 rem Run the sc command to create/reconfigure the service
-sc %SC_CMD% %SERVICE_NAME% binPath= "\"%SERVICE_BIN%\"" start= %SERVICE_START_TYPE% DisplayName= "Sunshine Service"
+sc %SC_CMD% %SERVICE_NAME% binPath= "\"%SERVICE_BIN%\"" start= %SERVICE_START_TYPE% DisplayName= "Sunshine Extended Service"
 
 rem Set the description of the service
-sc description %SERVICE_NAME% "Sunshine is a self-hosted game stream host for Moonlight."
+sc description %SERVICE_NAME% "Sunshine Extended - self-hosted game stream host for Moonlight (with mic passthrough + clipboard sync)."
 
 rem Start the new service
 net start %SERVICE_NAME%

@@ -55,6 +55,6 @@ jobs:
           ls -la ../artifacts
       - uses: actions/upload-artifact@v4
         with:
-          name: sunshine-mic-windows
+          name: sunshine-extended-windows
           path: artifacts/
           if-no-files-found: error

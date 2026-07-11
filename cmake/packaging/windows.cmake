@@ -75,6 +75,12 @@ execute_process(COMMAND cmd.exe /c mklink /J "${shaders_in_build_dest_native}" "
 
 set(CPACK_PACKAGE_ICON "${CMAKE_SOURCE_DIR}\\\\sunshine.ico")
 
+# --- Sunshine Extended: distinct package identity (coexists with stock Sunshine) ---
+set(CPACK_PACKAGE_NAME "Sunshine Extended")
+set(CPACK_PACKAGE_FILE_NAME "SunshineExtended")
+set(CPACK_NSIS_DISPLAY_NAME "Sunshine Extended")
+set(CPACK_NSIS_PACKAGE_NAME "Sunshine Extended")
+
 # The name of the directory that will be created in C:/Program files/
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "${CPACK_PACKAGE_NAME}")
 
