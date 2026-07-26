@@ -14,6 +14,7 @@
 #include <newdev.h>
 #include <roapi.h>
 #include <synchapi.h>
+#include <wrl/client.h>  // Microsoft::WRL::ComPtr — backs com_ptr_t used by the mic passthrough output
 
 // local includes
 #include "src/config.h"
@@ -528,6 +529,7 @@ namespace platf::audio {
 
       status = audio_client->GetService(IID_IAudioCaptureClient, (void **) &audio_capture);
       if (FAILED(status)) {
+
         BOOST_LOG(error) << "Couldn't initialize audio capture client [0x"sv << util::hex(status).to_string_view() << ']';
 
         return -1;
@@ -688,6 +690,224 @@ namespace platf::audio {
     HANDLE mmcss_task_handle = nullptr;
   };
 
+  /**
+   * @brief Platform audio controller that manages sinks and microphone capture.
+   */
+  // cardoza's mic passthrough output was written against a generic ComPtr-style
+  // handle it called com_ptr_t<T> (IID_PPV_ARGS(&x), &out-params, operator bool).
+  // Sunshine has no such alias, so back it with WRL::ComPtr which supports those idioms.
+  template<class T>
+  using com_ptr_t = Microsoft::WRL::ComPtr<T>;
+
+  class mic_output_wasapi_t: public mic_output_t {
+  public:
+    com_ptr_t<IMMDeviceEnumerator> device_enum;
+    com_ptr_t<IMMDevice> device;
+    com_ptr_t<IAudioClient> audio_client;
+    com_ptr_t<IAudioRenderClient> render_client;
+    WAVEFORMATEX *wave_format = nullptr;
+    HANDLE event_handle = NULL;
+    std::string device_name;
+    bool started = false;
+
+    mic_output_wasapi_t(int channels, std::uint32_t sample_rate, const std::string &dev_name) 
+      : device_name(dev_name) {
+      
+      auto hr = CoCreateInstance(
+        __uuidof(MMDeviceEnumerator),
+        nullptr,
+        CLSCTX_ALL,
+        IID_PPV_ARGS(&device_enum)
+      );
+
+      if (FAILED(hr)) {
+        BOOST_LOG(error) << "Failed to create device enumerator: "sv << std::hex << hr;
+        return;
+      }
+
+      // Use default device if device_name is empty or "default"
+      if (device_name.empty() || device_name == "default") {
+        hr = device_enum->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+      } else {
+        // Try to find device by name
+        com_ptr_t<IMMDeviceCollection> collection;
+        hr = device_enum->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &collection);
+        if (SUCCEEDED(hr)) {
+          UINT count;
+          collection->GetCount(&count);
+          for (UINT i = 0; i < count && !device; i++) {
+            com_ptr_t<IMMDevice> temp_device;
+            collection->Item(i, &temp_device);
+            
+            com_ptr_t<IPropertyStore> prop_store;
+            temp_device->OpenPropertyStore(STGM_READ, &prop_store);
+            
+            PROPVARIANT prop_var;
+            PropVariantInit(&prop_var);
+            prop_store->GetValue(PKEY_Device_FriendlyName, &prop_var);
+            
+            std::wstring name = prop_var.pwszVal;
+            std::string device_friendly_name(name.begin(), name.end());
+            
+            if (device_friendly_name.find(device_name) != std::string::npos) {
+              device = temp_device;
+            }
+            
+            PropVariantClear(&prop_var);
+          }
+        }
+        
+        if (!device) {
+          hr = device_enum->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+        }
+      }
+
+      if (FAILED(hr) || !device) {
+        BOOST_LOG(error) << "Failed to get audio device: "sv << std::hex << hr;
+        return;
+      }
+
+      hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&audio_client);
+      if (FAILED(hr)) {
+        BOOST_LOG(error) << "Failed to activate audio client: "sv << std::hex << hr;
+        return;
+      }
+
+      // Set up wave format for mono float at specified sample rate
+      WAVEFORMATEXTENSIBLE wave_ex = {};
+      wave_ex.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+      wave_ex.Format.nChannels = channels;
+      wave_ex.Format.nSamplesPerSec = sample_rate;
+      wave_ex.Format.wBitsPerSample = 32;
+      wave_ex.Format.nBlockAlign = channels * sizeof(float);
+      wave_ex.Format.nAvgBytesPerSec = sample_rate * wave_ex.Format.nBlockAlign;
+      wave_ex.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+      wave_ex.Samples.wValidBitsPerSample = 32;
+      wave_ex.dwChannelMask = SPEAKER_FRONT_CENTER;
+      wave_ex.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+
+      wave_format = (WAVEFORMATEX*)&wave_ex;
+
+      event_handle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+      if (!event_handle) {
+        BOOST_LOG(error) << "Failed to create event handle";
+        return;
+      }
+
+      // AUTOCONVERTPCM lets shared-mode accept our mono 48k float format and convert it
+      // to the device mix format (usually stereo); without it Initialize returns
+      // AUDCLNT_E_UNSUPPORTED_FORMAT (0x88890008). SRC_DEFAULT_QUALITY picks the resampler.
+      hr = audio_client->Initialize(
+        AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+        1000000, // 100ms buffer: headroom for network jitter (frames arrive ~20ms apart in bursts)
+        0,
+        wave_format,
+        nullptr
+      );
+
+      if (FAILED(hr)) {
+        BOOST_LOG(error) << "Failed to initialize audio client: "sv << std::hex << hr;
+        return;
+      }
+
+      hr = audio_client->SetEventHandle(event_handle);
+      if (FAILED(hr)) {
+        BOOST_LOG(error) << "Failed to set event handle: "sv << std::hex << hr;
+        return;
+      }
+
+      hr = audio_client->GetService(IID_PPV_ARGS(&render_client));
+      if (FAILED(hr)) {
+        BOOST_LOG(error) << "Failed to get render client: "sv << std::hex << hr;
+        return;
+      }
+    }
+
+    int output_samples(const std::vector<float> &frame_buffer) override {
+      if (!audio_client || !render_client || !started) {
+        return -1;
+      }
+
+      UINT32 buffer_frames = 0;
+      audio_client->GetBufferSize(&buffer_frames);
+      const UINT32 needed = (UINT32) frame_buffer.size();
+
+      // Write the ENTIRE frame or drop it -- never a partial frame. The old code
+      // wrote min(available, size) and discarded the remainder whenever padding>0
+      // (nearly always) -> choppy distortion. With the 100ms buffer there is
+      // almost always room for a whole 960-frame packet; if the buffer is briefly
+      // full we wait a bounded number of short intervals, then drop the frame
+      // (never truncate, never spin forever).
+      static int s_dbg = 0;
+      for (int tries = 0; tries < 8; tries++) {
+        UINT32 padding = 0;
+        auto ph = audio_client->GetCurrentPadding(&padding);
+        if (FAILED(ph)) {
+          BOOST_LOG(warning) << "mic: GetCurrentPadding failed "sv << std::hex << ph;
+          return -1;
+        }
+        UINT32 available = (padding <= buffer_frames) ? (buffer_frames - padding) : 0;
+
+        if (available >= needed) {
+          BYTE *buffer_ptr = nullptr;
+          auto hr = render_client->GetBuffer(needed, &buffer_ptr);
+          if (FAILED(hr)) {
+            BOOST_LOG(warning) << "mic: GetBuffer("sv << needed << ") failed "sv << std::hex << hr;
+            return -1;
+          }
+          memcpy(buffer_ptr, frame_buffer.data(), needed * sizeof(float));
+          hr = render_client->ReleaseBuffer(needed, 0);
+          if (FAILED(hr)) {
+            BOOST_LOG(warning) << "mic: ReleaseBuffer failed "sv << std::hex << hr;
+            return -1;
+          }
+          if ((s_dbg++ % 100) == 0) {
+            BOOST_LOG(debug) << "mic: rendered frame #"sv << s_dbg << " ("sv << needed
+                             << " frames, buf="sv << buffer_frames << " pad="sv << padding << ")"sv;
+          }
+          return 0;
+        }
+        // Buffer full: give the device a moment to drain, then re-check.
+        WaitForSingleObjectEx(event_handle, 20, FALSE);
+      }
+      if ((s_dbg++ % 100) == 0) {
+        BOOST_LOG(debug) << "mic: dropped frame, buffer stayed full (buf="sv << buffer_frames << ")"sv;
+      }
+      return 0;
+    }
+
+    int start() override {
+      if (!audio_client) {
+        return -1;
+      }
+
+      auto hr = audio_client->Start();
+      if (FAILED(hr)) {
+        BOOST_LOG(error) << "Failed to start audio client: "sv << std::hex << hr;
+        return -1;
+      }
+
+      started = true;
+      return 0;
+    }
+
+    int stop() override {
+      if (audio_client && started) {
+        audio_client->Stop();
+        started = false;
+      }
+      return 0;
+    }
+
+    ~mic_output_wasapi_t() {
+      stop();
+      if (event_handle) {
+        CloseHandle(event_handle);
+      }
+    }
+  };
+
   class audio_control_t: public ::platf::audio_control_t {
   public:
     std::optional<sink_t> sink_info() override {
@@ -784,6 +1004,10 @@ namespace platf::audio {
       }
 
       return mic;
+    }
+
+    std::unique_ptr<mic_output_t> mic_output(int channels, std::uint32_t sample_rate, const std::string &device_name) override {
+      return std::make_unique<mic_output_wasapi_t>(channels, sample_rate, device_name);
     }
 
     /**

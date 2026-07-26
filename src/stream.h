@@ -16,9 +16,10 @@
 #include "video.h"
 
 namespace stream {
-  constexpr auto VIDEO_STREAM_PORT = 9;
-  constexpr auto CONTROL_PORT = 10;
-  constexpr auto AUDIO_STREAM_PORT = 11;
+  constexpr auto VIDEO_STREAM_PORT = 9;  ///< GameStream base-port offset used for the video UDP stream.
+  constexpr auto CONTROL_PORT = 10;  ///< GameStream base-port offset used for the control channel.
+  constexpr auto AUDIO_STREAM_PORT = 11;  ///< GameStream base-port offset used for the audio UDP stream.
+  constexpr auto MIC_STREAM_PORT = 12;
 
   struct session_t;
 

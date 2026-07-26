@@ -5,6 +5,7 @@
 // standard includes
 #include <csignal>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iterator>
 #include <set>
@@ -27,6 +28,8 @@
 #include <WinSock2.h>
 #include <Windows.h>
 #include <WinUser.h>
+#include <shellapi.h>
+#include <shlobj.h>
 #include <wlanapi.h>
 #include <WS2tcpip.h>
 #include <WtsApi32.h>
@@ -1794,5 +1797,215 @@ namespace platf {
 
   std::string resolve_render_device() {
     return {};
+  }
+
+  // --- Clipboard sync (text only) ---------------------------------------------
+  // Ported from ClassicOldSong/Apollo. Reads/writes CF_UNICODETEXT via the Win32
+  // clipboard, converting to/from UTF-8 with our utf_utils helpers.
+
+  // Windows expects CRLF line endings on the clipboard; insert \r before any \n
+  // that isn't already preceded by one.
+  static std::string ensure_crlf(const std::string &utf8) {
+    std::string result;
+    result.reserve(utf8.size() + utf8.size() / 2);
+    for (size_t i = 0; i < utf8.size(); ++i) {
+      if (utf8[i] == '\n' && (i == 0 || utf8[i - 1] != '\r')) {
+        result += '\r';
+      }
+      result += utf8[i];
+    }
+    return result;
+  }
+
+  static std::wstring read_clipboard_utf16() {
+    if (!OpenClipboard(nullptr)) {
+      BOOST_LOG(warning) << "Failed to open clipboard for reading"sv;
+      return L"";
+    }
+    HANDLE h_data = GetClipboardData(CF_UNICODETEXT);
+    if (h_data == nullptr) {
+      CloseClipboard();
+      return L"";
+    }
+    auto *psz = static_cast<wchar_t *>(GlobalLock(h_data));
+    if (psz == nullptr) {
+      CloseClipboard();
+      return L"";
+    }
+    std::wstring ret = psz;
+    GlobalUnlock(h_data);
+    CloseClipboard();
+    return ret;
+  }
+
+  static bool write_clipboard_utf16(const std::wstring &text) {
+    if (!OpenClipboard(nullptr)) {
+      BOOST_LOG(warning) << "Failed to open clipboard for writing"sv;
+      return false;
+    }
+    if (!EmptyClipboard()) {
+      CloseClipboard();
+      return false;
+    }
+    HGLOBAL h_global = GlobalAlloc(GMEM_MOVEABLE, text.size() * 2 + 2);
+    if (h_global == nullptr) {
+      CloseClipboard();
+      return false;
+    }
+    auto *p_global = static_cast<char *>(GlobalLock(h_global));
+    if (p_global == nullptr) {
+      GlobalFree(h_global);
+      CloseClipboard();
+      return false;
+    }
+    memcpy(p_global, text.c_str(), text.size() * 2 + 2);
+    GlobalUnlock(h_global);
+    if (SetClipboardData(CF_UNICODETEXT, h_global) == nullptr) {
+      GlobalFree(h_global);
+      CloseClipboard();
+      return false;
+    }
+    CloseClipboard();
+    return true;
+  }
+
+  std::string get_clipboard() {
+    return utf_utils::to_utf8(read_clipboard_utf16());
+  }
+
+  bool set_clipboard(const std::string &content) {
+    return write_clipboard_utf16(utf_utils::from_utf8(ensure_crlf(content)));
+  }
+
+  // --- Clipboard files (CF_HDROP) ---------------------------------------------
+
+  std::vector<clipboard_file_t> get_clipboard_files() {
+    std::vector<clipboard_file_t> files;
+
+    if (!OpenClipboard(nullptr)) {
+      return files;
+    }
+    HANDLE h = GetClipboardData(CF_HDROP);
+    if (h == nullptr) {
+      CloseClipboard();
+      return files;
+    }
+    auto hdrop = static_cast<HDROP>(GlobalLock(h));
+    if (hdrop == nullptr) {
+      CloseClipboard();
+      return files;
+    }
+
+    UINT count = DragQueryFileW(hdrop, 0xFFFFFFFF, nullptr, 0);
+    for (UINT i = 0; i < count; i++) {
+      UINT len = DragQueryFileW(hdrop, i, nullptr, 0);
+      if (len == 0) {
+        continue;
+      }
+      std::wstring path(len, L'\0');
+      DragQueryFileW(hdrop, i, path.data(), len + 1);
+
+      std::filesystem::path p(path);
+      std::error_code ec;
+      if (!std::filesystem::is_regular_file(p, ec)) {
+        // Skip directories/specials in this text+files MVP.
+        continue;
+      }
+      std::ifstream in(p, std::ios::binary);
+      if (!in) {
+        continue;
+      }
+      clipboard_file_t f;
+      f.name = utf_utils::to_utf8(p.filename().wstring());
+      f.data.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+      files.push_back(std::move(f));
+    }
+
+    GlobalUnlock(h);
+    CloseClipboard();
+    return files;
+  }
+
+  bool set_clipboard_files(const std::vector<clipboard_file_t> &files) {
+    if (files.empty()) {
+      return false;
+    }
+    namespace fs = std::filesystem;
+
+    // Stage the received files under %TEMP%\sunshine-clipboard (cleared first, so
+    // only the most recent clipboard set persists).
+    wchar_t tmp[MAX_PATH];
+    DWORD n = GetTempPathW(MAX_PATH, tmp);
+    if (n == 0) {
+      return false;
+    }
+    fs::path stage = fs::path(std::wstring(tmp, n)) / L"sunshine-clipboard";
+    std::error_code ec;
+    fs::remove_all(stage, ec);
+    fs::create_directories(stage, ec);
+    if (ec) {
+      BOOST_LOG(warning) << "Failed to create clipboard staging dir"sv;
+      return false;
+    }
+
+    std::vector<std::wstring> paths;
+    for (const auto &f : files) {
+      // Use the filename component only (guard against path traversal).
+      fs::path fp = stage / fs::path(utf_utils::from_utf8(f.name)).filename();
+      std::ofstream out(fp, std::ios::binary);
+      if (!out) {
+        continue;
+      }
+      out.write(f.data.data(), static_cast<std::streamsize>(f.data.size()));
+      out.close();
+      paths.push_back(fp.wstring());
+    }
+    if (paths.empty()) {
+      return false;
+    }
+
+    // Build a DROPFILES structure followed by a double-null-terminated list of
+    // wide-char paths, and place it as CF_HDROP.
+    size_t chars = 0;
+    for (const auto &p : paths) {
+      chars += p.size() + 1;
+    }
+    chars += 1;  // extra terminating null for the list
+    size_t bytes = sizeof(DROPFILES) + chars * sizeof(wchar_t);
+
+    HGLOBAL h_global = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (h_global == nullptr) {
+      return false;
+    }
+    auto *df = static_cast<DROPFILES *>(GlobalLock(h_global));
+    df->pFiles = sizeof(DROPFILES);
+    df->pt.x = 0;
+    df->pt.y = 0;
+    df->fNC = FALSE;
+    df->fWide = TRUE;
+    auto *dst = reinterpret_cast<wchar_t *>(reinterpret_cast<char *>(df) + sizeof(DROPFILES));
+    for (const auto &p : paths) {
+      memcpy(dst, p.c_str(), (p.size() + 1) * sizeof(wchar_t));
+      dst += p.size() + 1;
+    }
+    *dst = L'\0';
+    GlobalUnlock(h_global);
+
+    if (!OpenClipboard(nullptr)) {
+      GlobalFree(h_global);
+      return false;
+    }
+    if (!EmptyClipboard()) {
+      CloseClipboard();
+      GlobalFree(h_global);
+      return false;
+    }
+    if (SetClipboardData(CF_HDROP, h_global) == nullptr) {
+      CloseClipboard();
+      GlobalFree(h_global);
+      return false;
+    }
+    CloseClipboard();
+    return true;
   }
 }  // namespace platf

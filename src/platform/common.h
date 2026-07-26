@@ -10,6 +10,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <vector>
 
 // lib includes
 #include <boost/core/noncopyable.hpp>
@@ -558,11 +559,31 @@ namespace platf {
     virtual ~mic_t() = default;
   };
 
+  /**
+   * @brief Sink that receives a decoded client microphone stream (mic passthrough).
+   */
+  class mic_output_t {
+  public:
+    virtual int output_samples(const std::vector<float> &frame_buffer) = 0;
+    virtual int start() = 0;
+    virtual int stop() = 0;
+
+    virtual ~mic_output_t() = default;
+  };
+
+  /**
+   * @brief Platform audio controller that manages sinks and microphone capture.
+   */
   class audio_control_t {
   public:
     virtual int set_sink(const std::string &sink) = 0;
 
     virtual std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, bool continuous, [[maybe_unused]] bool host_audio_enabled) = 0;
+
+    /**
+     * @brief Create an output that injects a received client microphone into a device (mic passthrough).
+     */
+    virtual std::unique_ptr<mic_output_t> mic_output(int channels, std::uint32_t sample_rate, const std::string &device_name) = 0;
 
     /**
      * @brief Check if the audio sink is available in the system.
@@ -905,5 +926,39 @@ namespace platf {
    * @param all_caps Bool that specifies whether to drop all caps or only CAP_SYS_ADMIN
    */
   void drop_elevated_privileges(bool all_caps);
+
+  /**
+   * @brief Get the host's current clipboard text (UTF-8). Empty if unavailable.
+   * @return Clipboard text.
+   */
+  std::string get_clipboard();
+
+  /**
+   * @brief Set the host's clipboard to the given UTF-8 text.
+   * @param content UTF-8 text to place on the clipboard.
+   * @return True on success.
+   */
+  bool set_clipboard(const std::string &content);
+
+  /**
+   * @brief A single clipboard file: its display name and raw bytes.
+   */
+  struct clipboard_file_t {
+    std::string name;  ///< File name (no path).
+    std::string data;  ///< Raw file contents.
+  };
+
+  /**
+   * @brief Get the files currently on the host clipboard (e.g. copied in Explorer).
+   * @return List of files with contents; empty if the clipboard holds no files.
+   */
+  std::vector<clipboard_file_t> get_clipboard_files();
+
+  /**
+   * @brief Place the given files on the host clipboard (staged to a temp dir).
+   * @param files Files (name + contents) to expose for pasting.
+   * @return True on success.
+   */
+  bool set_clipboard_files(const std::vector<clipboard_file_t> &files);
 
 }  // namespace platf

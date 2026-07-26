@@ -557,6 +557,40 @@ if ($Action -eq "install") {
         -Emoji "🛡️"
     Write-Information ""
 
+    # 3b. Install VB-Audio Virtual Cable (needed for microphone passthrough).
+    # It is WHQL-signed, so pnputil installs it silently. Non-fatal: if this fails,
+    # the rest of the install (service, clipboard) still completes.
+    Write-FramedText -Message "🎤 Setting up virtual audio device (VB-Cable)" -Level "Info"
+    try {
+        $haveCable = Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like '*CABLE*' }
+        if ($haveCable) {
+            Write-Information "  VB-Audio Cable already present; skipping."
+        }
+        else {
+            $vbUrl = "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack43.zip"
+            $vbZip = Join-Path $env:TEMP "vbcable_pack.zip"
+            $vbDir = Join-Path $env:TEMP "vbcable_pack"
+            Write-Information "  Downloading VB-Audio Cable..."
+            Invoke-WebRequest -Uri $vbUrl -OutFile $vbZip -UseBasicParsing
+            if (Test-Path $vbDir) { Remove-Item $vbDir -Recurse -Force }
+            Expand-Archive -Path $vbZip -DestinationPath $vbDir -Force
+            $inf = Get-ChildItem -Path $vbDir -Recurse -Filter "*.inf" |
+                Where-Object { $_.Name -like '*cable*' } | Select-Object -First 1
+            if ($inf) {
+                Write-Information "  Installing VB-Audio Cable driver ($($inf.Name))..."
+                & pnputil /add-driver "$($inf.FullName)" /install | Out-Null
+            }
+            else {
+                Write-Warning "  VB-Cable INF not found in pack; skipping."
+            }
+        }
+    }
+    catch {
+        Write-Warning "  VB-Audio Cable install failed: $($_.Exception.Message). Microphone passthrough will not work until it is installed manually."
+    }
+    Write-Information ""
+
     # 4. Install service
     $currentStep++
     Write-Progress `

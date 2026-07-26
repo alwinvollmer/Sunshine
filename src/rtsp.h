@@ -20,8 +20,9 @@ namespace rtsp_stream {
     crypto::aes_t gcm_key;
     crypto::aes_t iv;
 
-    std::string av_ping_payload;
-    uint32_t control_connect_data;
+    std::string av_ping_payload;  ///< AV ping payload.
+    bool client_mic_enabled;
+    uint32_t control_connect_data;  ///< Client-provided token used when connecting the control channel.
 
     bool host_audio;
     std::string unique_id;
