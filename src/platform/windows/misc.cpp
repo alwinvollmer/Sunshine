@@ -1818,6 +1818,9 @@ namespace platf {
   }
 
   static std::wstring read_clipboard_utf16() {
+    // Attach this thread to the interactive input desktop; the HTTP worker
+    // thread otherwise sees a different (empty) clipboard than the user's session.
+    syncThreadDesktop();
     if (!OpenClipboard(nullptr)) {
       BOOST_LOG(warning) << "Failed to open clipboard for reading"sv;
       return L"";
@@ -1839,6 +1842,8 @@ namespace platf {
   }
 
   static bool write_clipboard_utf16(const std::wstring &text) {
+    // See read_clipboard_utf16: attach to the interactive desktop first.
+    syncThreadDesktop();
     if (!OpenClipboard(nullptr)) {
       BOOST_LOG(warning) << "Failed to open clipboard for writing"sv;
       return false;
@@ -1882,6 +1887,9 @@ namespace platf {
   std::vector<clipboard_file_t> get_clipboard_files() {
     std::vector<clipboard_file_t> files;
 
+    // Attach to the interactive input desktop so we read the user's clipboard,
+    // not the HTTP worker thread's empty one.
+    syncThreadDesktop();
     if (!OpenClipboard(nullptr)) {
       return files;
     }
@@ -1991,6 +1999,9 @@ namespace platf {
     *dst = L'\0';
     GlobalUnlock(h_global);
 
+    // Attach to the interactive input desktop so the file lands on the user's
+    // clipboard (pasteable in Explorer), not the HTTP worker thread's own.
+    syncThreadDesktop();
     if (!OpenClipboard(nullptr)) {
       GlobalFree(h_global);
       return false;
